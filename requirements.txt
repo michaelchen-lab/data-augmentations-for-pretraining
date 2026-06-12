@@ -1,0 +1,20 @@
+# Core deep learning
+torch>=2.6.0          # install CUDA build from https://pytorch.org if needed
+transformers>=4.57.0
+accelerate>=0.26.0
+datasets>=4.4.1
+
+# Embedding model (used as tokenizer source; required even for default AR training)
+sentence_transformers>=5.0.0
+
+# Evaluation
+lm_eval[hf]>=0.4.11   # lm-evaluation-harness
+scipy>=1.11.0
+
+# Plotting
+matplotlib>=3.8.0
+
+# Utilities
+numpy>=2.0.0
+python-dotenv>=1.0.0
+wandb>=0.23.0          # optional; set WANDB_DISABLED=true to skip

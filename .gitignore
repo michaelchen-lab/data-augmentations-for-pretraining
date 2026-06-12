@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+
+# Environment
+.env
+*.env
+
+# Data (auto-downloaded; can be large)
+pretraining_data/
+finetuning_datasets/
+
+# Training outputs
+runs/
+results/
+
+# Generated figures
+figures/
+
+# Cache
+.cache/
+*.cache
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db

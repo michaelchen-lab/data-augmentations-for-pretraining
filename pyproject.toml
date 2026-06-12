@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data_aug_pretraining"
+version = "1.0.0"
+description = "Data Augmentations for Data-Constrained Language Model Pretraining"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "datasets>=4.4.1",
+    "lm_eval[hf]>=0.4.11",
+    "numpy>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "sentence_transformers>=5.0.0",
+    "torch>=2.6.0",
+    "transformers>=4.57.0",
+    "wandb>=0.23.0",
+    "accelerate>=0.26.0",
+    "matplotlib>=3.8.0",
+    "scipy>=1.11.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+include = ["src", "src.*"]
