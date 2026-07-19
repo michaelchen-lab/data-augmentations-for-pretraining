@@ -1,6 +1,4 @@
-# Data Augmentations for Data-Constrained Language Model Pretraining
-
-Replication code for the paper **"Data Augmentations for Data-Constrained Language Model Pretraining"**.
+# Demystifying Training-Time Augmentation for Data-Constrained Language Model Pretraining
 
 We study three orthogonal categories of training-time data augmentation as regularizers for autoregressive (AR) language model pretraining in the data-constrained, multi-epoch regime:
 
@@ -50,7 +48,7 @@ pip install -e .
 
 ## Pretraining data
 
-Training reads token shards from `pretraining_data/75M/shard_XXXXXXXX_processed.jsonl` and validates on `pretraining_data/val_shard_00000000_processed.jsonl`. If these files are absent, `dataset.py` downloads them automatically from the Hugging Face dataset [`michaelchenkj/DCLM-pretraining-dataset`](https://huggingface.co/datasets/michaelchenkj/DCLM-pretraining-dataset).
+Training reads token shards from `pretraining_data/75M/shard_XXXXXXXX_processed.jsonl` and validates on `pretraining_data/val_shard_00000000_processed.jsonl`. If these files are absent, `dataset.py` downloads them automatically from the Hugging Face dataset [here](https://huggingface.co/datasets/gashingriver5963/DCLM-pretraining-dataset).
 
 To build the data locally from DCLM-RefinedWeb (requires network access and `zstd`):
 
