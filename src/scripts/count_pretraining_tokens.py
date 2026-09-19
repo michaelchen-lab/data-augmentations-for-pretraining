@@ -12,9 +12,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from transformers import AutoTokenizer
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from constants import TOKENIZER_NAME
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tokenizer",
         type=str,
-        default="Qwen/Qwen2-0.5B",
+        default=TOKENIZER_NAME,
         help="Hugging Face tokenizer name/path.",
     )
     parser.add_argument(

@@ -5,27 +5,26 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "data_aug_pretraining"
 version = "1.0.0"
-description = "Data Augmentations for Data-Constrained Language Model Pretraining"
+description = "Training-time data augmentation for data-constrained language model pretraining"
 readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.11"
 dependencies = [
-    "datasets>=4.4.1",
-    "lm_eval[hf]>=0.4.11",
+    "datasets==5.0.1",
+    "lm_eval[hf]==0.4.12",
     "numpy>=2.0.0",
-    "python-dotenv>=1.0.0",
-    "sentence_transformers>=5.0.0",
+    "python-dotenv==1.2.3",
     "torch>=2.6.0",
-    "transformers>=4.57.0",
-    "wandb>=0.23.0",
-    "accelerate>=0.26.0",
-    "matplotlib>=3.8.0",
-    "scipy>=1.11.0",
+    "transformers==5.15.0",
+    "wandb==0.28.2",
+    "accelerate==1.14.0",
+    "matplotlib==3.11.1",
+    "scipy==1.18.0",
+    "huggingface_hub>=0.30.0",
+    "requests>=2.32.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest",
 ]
-
-[tool.setuptools.packages.find]
-include = ["src", "src.*"]

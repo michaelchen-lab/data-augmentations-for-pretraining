@@ -1,85 +1,87 @@
 # Demystifying Training-Time Augmentation for Data-Constrained Language Model Pretraining
 
-We study three orthogonal categories of training-time data augmentation as regularizers for autoregressive (AR) language model pretraining in the data-constrained, multi-epoch regime:
+Code for the paper. We study three orthogonal categories of training-time data augmentation as regularizers for autoregressive language model pretraining in the data-constrained, multi-epoch regime:
 
 1. **Token-level noise** — masking or random token replacement
 2. **Sequence permutations** — right-to-left prediction and Fill-in-the-Middle (FIM)
-3. **Target offset prediction** — predicting $x_{t+i}$ for $i > 1$
+3. **Target offset prediction** — predicting \(x_{t+i}\) for \(i > 1\)
 
-All experiments use a 150M-parameter Llama-based model trained on 75M tokens from DCLM-RefinedWeb for 100 epochs. The primary metric is held-out validation loss; zero-shot benchmarks via `lm-evaluation-harness` serve as a secondary signal.
+All paper models are a 150M-parameter Llama (20 layers, hidden 512, 4 heads, FFN 1536, context 2048) trained on DCLM-RefinedWeb. The primary metric is held-out left-to-right validation loss. Zero-shot `lm-evaluation-harness` scores are a secondary signal.
 
----
-
-## Repository structure
-
-```
-data_aug_pretraining/
-├── src/
-│   ├── train.py                        # Main pretraining script
-│   ├── model.py                        # Model definition and augmentation wrappers
-│   ├── dataset.py                      # Dataset loading and preprocessing
-│   ├── eval_checkpoints_l2r.py         # Primary eval: validation loss sweep
-│   ├── eval_checkpoints_lmharness.py   # Secondary eval: zero-shot benchmarks
-│   └── scripts/
-│       ├── extract_pretraining_data.py  # Download/extract DCLM-RefinedWeb shards
-│       └── count_pretraining_tokens.py  # Verify token counts in extracted data
-├── pyproject.toml
-├── requirements.txt
-└── README.md
-```
-
-Pretraining data is **not** included but is downloaded automatically from Hugging Face on first run (see [Pretraining data](#pretraining-data)). Results and figures are generated locally by running the scripts.
+Released checkpoints live in the Hugging Face dataset [`michaelchenkj/test-models`](https://huggingface.co/datasets/michaelchenkj/test-models) (`runs/` + `results/`). Do not mix Protocol A and Protocol B numbers: they are different training recipes (see below).
 
 ---
 
 ## Setup
 
 ```bash
-git clone <this-repo>
-cd data_aug_pretraining
-pip install -e .
+git clone https://github.com/michaelchen-lab/data-augmentations-for-pretraining.git
+cd data-augmentations-for-pretraining
+pip install -r requirements.txt
 ```
 
-**WandB (optional).** If you have a WandB account, create a `.env` file with `WANDB_API_KEY=<your key>`. Otherwise, training automatically disables WandB logging.
+Install a CUDA PyTorch build from [pytorch.org](https://pytorch.org) first. Paper runs used **PyTorch 2.11.0+cu128** and **transformers 5.15.0**. Pinning `transformers` matters: an older build was used for some original Table 1 checkpoints and moves val loss at the ~0.02 level.
 
-**Hardware.** All paper runs used either a 2×H100 or 4×A100 setup. The commands below use `torchrun` for multi-GPU training; adjust `--nproc-per-node` for your setup.
+**WandB (optional).** Put `WANDB_API_KEY` in a `.env` file, or training disables WandB automatically.
+
+**Hardware.** Global batch is always **512 sequences × 2048 tokens**. Set `--nproc-per-node`, `-bs`, and `-ga` so `nproc × bs × ga = 512`.
+
+| Protocol | Paper GPUs | Typical flags |
+|---|---|---|
+| A (Tables 1–3, decay) | 2×H100 or 4×A100 | `-bs 8 -ga 32` on 2 GPUs; `-bs 8 -ga 16` on 4 |
+| B (§4.8, Appendix F) | 8×H100 | `-bs 8 -ga 8`, `--torch-compile` |
 
 ---
 
 ## Pretraining data
 
-Training reads token shards from `pretraining_data/75M/shard_XXXXXXXX_processed.jsonl` and validates on `pretraining_data/val_shard_00000000_processed.jsonl`. If these files are absent, `dataset.py` downloads them automatically from the Hugging Face dataset [here](https://huggingface.co/datasets/gashingriver5963/DCLM-pretraining-dataset).
+Training reads `pretraining_data/<N>M/shard_*_processed.jsonl` and validates on `pretraining_data/val_shard_00000000_processed.jsonl`. If those files are missing, `dataset.py` downloads them from [`michaelchenkj/DCLM-pretraining-dataset`](https://huggingface.co/datasets/michaelchenkj/DCLM-pretraining-dataset).
 
-To build the data locally from DCLM-RefinedWeb (requires network access and `zstd`):
+The 19M / 37M / 75M / 150M / 300M folders are nested prefixes of one shard ordering. To cut extra budgets from the released 300M set:
 
 ```bash
-# Extract ~75M tokens into pretraining_data/75M/
-python src/scripts/extract_pretraining_data.py --tokens 75
+python src/scripts/make_corpus_subset.py --tokens 19 --tokens 150
+```
 
-# Verify token count
+To rebuild from CommonCrawl DCLM-RefinedWeb instead (needs network and `zstd`):
+
+```bash
+python src/scripts/extract_pretraining_data.py --tokens 75
 python src/scripts/count_pretraining_tokens.py --data-dir pretraining_data/75M --show-per-file
 ```
 
+**Tokenizer.** The paper describes a Qwen2 tokenizer. Training loads it from `Qwen/Qwen3-Embedding-0.6B` (`tokenizer_class=Qwen2Tokenizer`). That is the ID used by every released checkpoint. Do **not** switch to `Qwen/Qwen2-0.5B`: the vocab length differs (151669 vs 151646 before augmentation special tokens).
+
 ---
 
-## Reproducing the experiments
+## Two training protocols
 
-The following commands reproduce the best-performing configuration from the paper: **Random 5% + R2L 50% + $i \leq 5$ exp.** All commands are run from the repository root. Adjust `--nproc-per-node` to match your GPU setup.
+The paper reports two families. Commands for every table row are in [`configs/paper_runs.json`](configs/paper_runs.json). `scripts/run_paper.py` prints or launches them.
 
-### Step 1: Stable-phase training (100 epochs)
+### Protocol A — Tables 1–3, WSD decay, downstream
+
+Constant LR, **100 epochs**, checkpoint **every 4 epochs**, **no online eval**. After training, sweep snapshots with `eval_checkpoints_l2r.py` and pick the min-loss checkpoint. Decay runs resume that checkpoint with a \(1-\sqrt{\cdot}\) WSD cooldown (~20% of the resume step).
+
+This is the original 2-GPU / 4×A100 family (`*-fulle-lm` on Hugging Face).
 
 ```bash
+# List every Table 1–2 run
+python scripts/run_paper.py --protocol a --list
+
+# Best 3-category combination (Table 2)
+python scripts/run_paper.py --protocol a --run random5-l2r50-i5-exp-fulle-lm --nproc 2
+
+# Equivalent explicit command
 torchrun --nproc-per-node 2 src/train.py \
-  -m-type default --lr-schedule constant -lr 6e-4 -e 100 \
-  --snapshot-interval 4 -bs 8 -ga 32 \
+  --lr-schedule constant -lr 6e-4 -e 100 \
+  --snapshot-interval 4 --eval-every-steps 0 \
+  -bs 8 -ga 32 \
   --random-token-percent 5 --l2r-percent 50 \
   --max-next-i 5 --next-i-weighting exp \
   -o ./runs/random5-l2r50-i5-exp-fulle-lm
 ```
 
-### Step 2: Validation loss sweep
-
-Evaluates every checkpoint saved during stable-phase training and writes per-checkpoint JSON files to `results/random5-l2r50-i5-exp-fulle-lm/l2r_n1_eval/`. We run this using a 1xRTX3090 setup.
+Post-hoc validation loss on every snapshot:
 
 ```bash
 python src/eval_checkpoints_l2r.py \
@@ -87,30 +89,74 @@ python src/eval_checkpoints_l2r.py \
   --add-l2r-token --global-eval-batch-size 512 -ga 256
 ```
 
-### Step 3: WSD decay phase
-
-Identify the checkpoint with the lowest validation loss from Step 2 (epoch 68, step 4896 in the paper), then resume training with the cooldown schedule:
+WSD decay from the paper min (epoch 68, step 4896, 979 decay steps):
 
 ```bash
-torchrun --nproc-per-node 2 src/train.py \
-  -m-type default --lr-schedule cooldown --num-decay-steps 979 -lr 6e-4 -e 86 \
-  -bs 8 -ga 32 \
-  --random-token-percent 5 --l2r-percent 50 \
-  --max-next-i 5 --next-i-weighting exp \
-  --resume-from-checkpoint runs/random5-l2r50-i5-exp-fulle-lm/checkpoint-4896 \
-  --save-final-only \
-  -o ./runs/random5-l2r50-i5-exp-fulle-lm-wsd
+python scripts/run_paper.py --protocol decay \
+  --run random5-l2r50-i5-exp-fulle-lm-wsd-from-4896 --nproc 2
 ```
 
-Then evaluate the decay checkpoint's validation loss, following the same command as Step 2 but pointing `--run-dir` at `runs/random5-l2r50-i5-exp-fulle-lm-wsd`.
+Then evaluate the decay run directory the same way. Resume steps for all eight decay configs are in `configs/paper_runs.json` (Appendix decay-details table).
 
-### Step 4: Zero-shot evaluation
+Zero-shot (Table 4 five tasks; Appendix G ten tasks):
 
 ```bash
 python src/eval_checkpoints_lmharness.py \
-  --run-dir runs/random5-l2r50-i5-exp-fulle-lm-wsd/checkpoint-4896 \
-  --add-l2r-token -bs 8
+  --run-dir runs/random5-l2r50-i5-exp-fulle-lm-wsd-from-4896 \
+  --add-l2r-token --suite paper5 -bs 8
+
+python src/eval_checkpoints_lmharness.py \
+  --run-dir runs/random5-l2r50-i5-exp-fulle-lm-wsd-from-4896 \
+  --add-l2r-token --suite paper10 -bs 8
 ```
+
+### Protocol B — §4.8 unique-token ladder and Appendix F seeds
+
+**Different recipe.** 8×H100, `torch.compile`, online eval **every 72 steps**, `--save-best-only`, early-stop patience **20** after **25** evals, **100-epoch cap**. Reported “test loss” is `min_eval_loss` from the results JSON.
+
+The 75M unique-token column in §4.8 is **spliced from Protocol A Tables 1–3**, not retrained under Protocol B. Appendix F seed 42 is a Protocol B *retrain* of the four headline configs; it is not the Table 1 run.
+
+```bash
+python scripts/run_paper.py --protocol unique --list
+python scripts/run_paper.py --protocol unique --nproc 8 --dry-run
+
+python scripts/run_paper.py --protocol seeds --list
+python scripts/run_paper.py --protocol seeds --run t1a_S2_C3_rand5_r2l50_i5exp_s43 --nproc 8
+```
+
+19M / 37M / 150M / 300M unique-token data must be on disk first (`make_corpus_subset.py` or the HF dataset).
+
+---
+
+## Figure
+
+```bash
+python scripts/plot_scaling.py --out figures
+```
+
+Writes `figures/paper_scaling_unique.pdf` (val loss + unique-data multiplier for baseline, Random 15%, and 3-cat).
+
+---
+
+## Layout
+
+```
+configs/paper_runs.json          # every paper training run
+scripts/run_paper.py             # launch / dry-run those runs
+scripts/plot_scaling.py          # §4.8 figure
+src/train.py                     # pretraining
+src/model.py                     # Llama + augmentation wrappers
+src/dataset.py                   # shard download, tokenize, pack
+src/eval_checkpoints_l2r.py      # primary metric
+src/eval_checkpoints_lmharness.py
+src/scripts/extract_pretraining_data.py
+src/scripts/make_corpus_subset.py
+src/scripts/count_pretraining_tokens.py
+src/scripts/build_caches.py
+tests/test_clean_eval.py         # eval must be unaugmented L2R
+```
+
+Checkpoints and large result dumps are not in git. Download them from Hugging Face or train locally into `runs/` and `results/` (gitignored).
 
 ---
 
@@ -118,37 +164,24 @@ python src/eval_checkpoints_lmharness.py \
 
 | Parameter | Value |
 |---|---|
-| Architecture | Llama-based, decoder-only |
-| Parameters | ~150M |
-| Layers / heads / width | 20 / 4 / 512 |
-| Context length | 2048 tokens |
-| Tokenizer | Qwen2 (vocab 151,646) |
-| Training tokens | 75M (DCLM-RefinedWeb) |
-| Global batch size | 512 sequences |
-| Peak learning rate | 6 × 10⁻⁴ |
-| LR schedule (stable) | Constant with 100-step warmup |
-| LR schedule (decay) | WSD 1−√· |
+| Architecture | Llama decoder, tied embeddings |
+| Parameters | 145.8M total / 68.2M non-embedding |
+| Layers / heads / width / FFN | 20 / 4 / 512 / 1536 |
+| Context | 2048 |
+| Tokenizer | Qwen2 via `Qwen/Qwen3-Embedding-0.6B` |
+| Unique tokens (main ablations) | 75M DCLM-RefinedWeb |
+| Global batch | 512 sequences |
+| Peak LR | \(6 \times 10^{-4}\) |
 | Weight decay | 0.033 |
-| Optimizer | AdamW (β₁=0.9, β₂=0.999) |
-| Training epochs | 100 (stable) + ~20% decay |
+| Optimizer | AdamW \(\beta=(0.9, 0.999)\), grad clip 1.0 |
+| Protocol A | constant LR, 100-step warmup, snapshot every 4 epochs |
+| Protocol A decay | WSD \(1-\sqrt{\cdot}\), ~20% of resume step |
+| Protocol B | constant LR, eval every 72 steps, early-stop 20 / min 25 evals |
 
-For full architecture and optimizer details see Appendix B of the paper.
+`python src/train.py --help` lists every flag.
 
 ---
 
-## Training argument reference
+## License and data
 
-Run `python src/train.py --help` for the full argument list. The most commonly used flags for replication:
-
-| Flag | Description |
-|---|---|
-| `--lr-schedule constant` | Use constant LR (stable phase); required for all ablation runs |
-| `-e 100` | Train for 100 epochs |
-| `--snapshot-interval 4` | Save checkpoint every 4 epochs |
-| `-bs 8 -ga 32` | Batch size 8 per device, 32 gradient accumulation steps → global batch 512 (2 GPUs) |
-| `--l2r-percent 50` | 50% L2R + 50% R2L (Category 2 permutation) |
-| `--mask-percent N` | Mask N% of input tokens (Category 1) |
-| `--random-token-percent N` | Replace N% of tokens randomly (Category 1) |
-| `--psm-percent N --spm-percent N` | FIM: N% PSM + N% SPM (Category 2) |
-| `--max-next-i N` | Offset prediction horizon (Category 3) |
-| `--next-i-weighting exp` | Exponential weighting over offsets (recommended) |
+This repository is MIT licensed. Pretraining text comes from [DCLM-RefinedWeb](https://data.commoncrawl.org) / DataComp-LM; follow that dataset’s terms when redistributing derived shards. The Qwen tokenizer is subject to the Alibaba Qwen license on Hugging Face.

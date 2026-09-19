@@ -19,11 +19,15 @@ import gzip
 import json
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import requests
 from transformers import AutoTokenizer
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from constants import TOKENIZER_NAME
 
 BASE_URL = "https://data.commoncrawl.org"
 DATASET_PREFIX = "contrib/datacomp/DCLM-refinedweb"
@@ -76,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tokenizer",
         type=str,
-        default="Qwen/Qwen2-0.5B",
+        default=TOKENIZER_NAME,
         help="Hugging Face tokenizer name/path.",
     )
     parser.add_argument(

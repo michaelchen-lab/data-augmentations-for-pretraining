@@ -1,10 +1,6 @@
 """
-Evaluate every HuggingFace Trainer checkpoint under a run directory using
-self-concept SSL with embed_window_size=1 (n=1) and 100% L2R only.
-
-Training parity: defaults mirror ``src/train.py`` eval for ``self-concept``
-(same ``per_device_eval_batch_size`` rule as training, dataloader workers,
-prefetch, pin_memory; no fp16/bf16 unless you match your training run).
+Evaluate every HuggingFace Trainer checkpoint under a run directory with
+held-out left-to-right next-token loss (the paper's primary metric).
 
 Writes one JSON per checkpoint under:
   results/<run_name>/l2r_n1_eval/<checkpoint_name>.json
@@ -13,20 +9,14 @@ Also appends a line to:
   results/<run_name>/l2r_n1_eval/summary.jsonl
 
 Usage (from repo root):
-  python src/eval_checkpoints_l2r.py --run-dir runs/bi-ssl
+  python src/eval_checkpoints_l2r.py --run-dir runs/baseline-fulle-lm
 
-Multi-GPU (same launcher as training); only rank 0 writes JSON / summary:
-  torchrun --nproc_per_node=2 src/eval_checkpoints_l2r.py --run-dir runs/bi-ssl
+Multi-GPU:
+  torchrun --nproc_per_node=2 src/eval_checkpoints_l2r.py --run-dir runs/baseline-fulle-lm
 
-Optional 512-token *global* eval microbatch (2 GPUs -> 256 per device):
-  torchrun --nproc_per_node=2 src/eval_checkpoints_l2r.py --run-dir runs/bi-ssl \\
-    --global-eval-batch-size 512
-
-Single GPU (e.g. RTX 3090): keep the *logical* eval batch at 512 but split forwards
-(Trainer still reports the correct dataset-level mean eval loss):
-  python src/eval_checkpoints_l2r.py --run-dir runs/bi-ssl \\
+Single GPU, global eval batch 512 split across gradient-accumulation steps:
+  python src/eval_checkpoints_l2r.py --run-dir runs/baseline-fulle-lm \\
     --global-eval-batch-size 512 -ga 8
-  # -> per_device_eval_batch_size=64 for each forward (512/8); 8x less VRAM than 512.
 """
 
 from __future__ import annotations
@@ -46,7 +36,7 @@ import torch.distributed as dist
 from transformers import LlamaForCausalLM, AutoTokenizer, TrainingArguments, Trainer
 
 from dataset import get_dataset
-from model import to_directional_lm_model, to_self_concept_model
+from model import to_directional_lm_model
 
 # Match train.py: limit BLAS threads when workers load tensors
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -77,7 +67,7 @@ def maybe_barrier() -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="L2R-only n=1 eval loss for all checkpoints in a runs/ subfolder.",
+        description="Held-out L2R next-token loss for all checkpoints in a runs/ subfolder.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
@@ -85,22 +75,13 @@ def parse_args() -> argparse.Namespace:
         "-r",
         type=str,
         required=True,
-        help="Path to a single run folder (e.g. runs/bi-ssl) containing checkpoint-* dirs.",
+        help="Path to a single run folder (e.g. runs/baseline-fulle-lm) containing checkpoint-* dirs.",
     )
     p.add_argument(
         "--results-root",
         type=str,
         default="results",
         help="Root directory for metrics (mirrors run name under here).",
-    )
-    p.add_argument(
-        "--model-type",
-        "-m-type",
-        type=str,
-        default="default",
-        choices=["default", "self-concept"],
-        help="Model objective to evaluate: 'default' uses LM loss; "
-        "'self-concept' uses embedding SSL loss.",
     )
     p.add_argument(
         "--add-l2r-token",
@@ -116,13 +97,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model-num-layers", "-layers", type=int, default=20)
     p.add_argument("--model-num-attention-heads", "-att-heads", type=int, default=4)
     p.add_argument("--model-max-length", "-maxlen", type=int, default=2048)
-    p.add_argument("--embed-loss-func", "-emb-loss", type=str, default="cosine", choices=["mse", "cosine"])
     p.add_argument(
         "--batch-size-per-device",
         "-bs",
         type=int,
         default=64,
-        help="Logical per-device eval batch (same meaning as train.py -bs for self-concept). "
+        help="Logical per-device eval batch. "
         "Trainer actually uses (logical // -ga) per forward. Ignored if --global-eval-batch-size is set.",
     )
     p.add_argument(
@@ -232,76 +212,31 @@ def _detect_max_next_i_train(tokenizer) -> int:
 def build_eval_args(base: argparse.Namespace) -> Any:
     """Namespace compatible with get_dataset."""
     ns = argparse.Namespace(**vars(base))
-    # Eval-only script: avoid loading train shards in get_dataset().
-    ns.training_files_no = 0
-    ns.model_type = base.model_type
-    ns.embed_window_size = 1
     ns.l2r_percent = 100.0
-    ns.output_embedding_size = 1024
-    ns.embedding_batch_size_multiplier = 16
-    ns.no_embed_sliding_window_attn = False
-    ns.embed_dir = None
-    ns.save_embed_filename = "./data/sample_embed.pt"
     ns.batch_size_per_device = base.batch_size_per_device
     ns.gradient_accumulation = 1
     return ns
 
 
-def load_self_concept_model(
-    checkpoint_path: str,
-    tokenizer: AutoTokenizer,
-    loss_func: str,
-    add_l2r_token: bool,
-) -> LlamaForCausalLM:
-    model = LlamaForCausalLM.from_pretrained(checkpoint_path)
-    to_self_concept_model(
-        model,
-        output_embedding_size=None,
-        loss_func=loss_func,
-        shift=1,
-        tokenizer=tokenizer,
-        l2r_percent=100.0,
-        add_l2r_token=add_l2r_token,
-    )
-    return model
-
-
 def load_eval_model(
     checkpoint_path: str,
     tokenizer: AutoTokenizer,
-    model_type: str,
-    loss_func: str,
     add_l2r_token: bool,
     next_i_enabled: bool = False,
 ) -> LlamaForCausalLM:
     model = LlamaForCausalLM.from_pretrained(checkpoint_path)
-    if model_type == "default":
-        if next_i_enabled:
-            # Checkpoint was trained with max_next_i > 1: use fixed i=1 eval layout.
-            # include_direction mirrors whether <|l2r_pred|> was part of the training format.
-            to_directional_lm_model(
-                model,
-                tokenizer,
-                l2r_percent=100.0,
-                max_next_i=1,
-                fixed_i=1,
-                include_direction=add_l2r_token,
-            )
-        elif add_l2r_token:
-            to_directional_lm_model(model, tokenizer, l2r_percent=100.0)
-        return model
-    if model_type == "self-concept":
-        to_self_concept_model(
+    if next_i_enabled:
+        to_directional_lm_model(
             model,
-            output_embedding_size=None,
-            loss_func=loss_func,
-            shift=1,
-            tokenizer=tokenizer,
+            tokenizer,
             l2r_percent=100.0,
-            add_l2r_token=add_l2r_token,
+            max_next_i=1,
+            fixed_i=1,
+            include_direction=add_l2r_token,
         )
-        return model
-    raise ValueError(f"Unsupported --model-type: {model_type}")
+    elif add_l2r_token:
+        to_directional_lm_model(model, tokenizer, l2r_percent=100.0)
+    return model
 
 
 def resolve_logical_per_device_eval_batch_size(args: argparse.Namespace) -> int:
@@ -314,7 +249,6 @@ def resolve_logical_per_device_eval_batch_size(args: argparse.Namespace) -> int:
                 f"--global-eval-batch-size ({g}) must be divisible by WORLD_SIZE ({ws})"
             )
         return g // ws
-    # train.py: self-concept uses full per_device_eval_batch_size (not halved like 'concept')
     return args.batch_size_per_device
 
 
@@ -391,7 +325,7 @@ def main() -> None:
     max_next_i_train = _detect_max_next_i_train(tokenizer)
     _, eval_dataset = get_dataset(eval_ns, tokenizer)
     maybe_barrier()
-    objective_label = "LM loss" if args.model_type == "default" else "self-concept SSL loss (n=1)"
+    objective_label = "LM loss"
     token_label = "<|l2r_pred|> prepended" if args.add_l2r_token else "<|l2r_pred|> omitted"
     next_i_label = (
         f"<|next_1_pred|> prepended (max_next_i_train={max_next_i_train})"
@@ -424,8 +358,6 @@ def main() -> None:
         model = load_eval_model(
             ckpt_path,
             tokenizer,
-            args.model_type,
-            args.embed_loss_func,
             args.add_l2r_token,
             next_i_enabled=next_i_enabled,
         )
@@ -458,12 +390,9 @@ def main() -> None:
             "global_step": step,
             "eval_loss": float(eval_loss) if eval_loss is not None else None,
             "metrics": {k: float(v) for k, v in metrics.items() if isinstance(v, (float, int))},
-            "model_type": args.model_type,
             "objective": objective_label,
             "add_l2r_token": bool(args.add_l2r_token),
             "l2r_percent": 100.0,
-            "embed_window_size": 1,
-            "embed_loss_func": args.embed_loss_func,
             "logical_per_device_eval_batch_size": logical_per_device,
             "per_device_eval_micro_batch_size": micro_per_device,
             "eval_gradient_accumulation_steps": args.eval_gradient_accumulation_steps,

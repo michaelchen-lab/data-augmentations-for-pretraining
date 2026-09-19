@@ -46,20 +46,23 @@ else:
 DEFAULT_TASKS = [
     "hellaswag",
     "piqa",
-    # "arc_easy",
     "arc_challenge",
-    # "openbookqa",
     "winogrande",
-    # "boolq",
     "copa",
-    # "lambada_openai",
-    # "sciq",
-    # babi removed: generate_until task with exact_match metric; unreliable at 150M scale.
-    # "rte",             # GLUE RTE (binary entailment)
-    # "commonsense_qa",
-    # "blimp",
-    # storycloze_2016 removed: relies on a legacy dataset script no longer
-    # supported by current versions of the datasets library.
+]
+
+# Table 4 five-task suite (paper §4.7). Appendix G also reports the ten-task list.
+PAPER10_TASKS = [
+    "hellaswag",
+    "piqa",
+    "arc_challenge",
+    "winogrande",
+    "copa",
+    "arc_easy",
+    "openbookqa",
+    "boolq",
+    "lambada_openai",
+    "sciq",
 ]
 
 # Chance baseline by number of options (for centered-accuracy aggregate).
@@ -209,10 +212,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--run-dir", "-r", required=True, type=Path, help="runs/<run_name> directory")
     p.add_argument("--results-root", type=Path, default=Path("results"))
     p.add_argument(
+        "--suite",
+        choices=["paper5", "paper10"],
+        default="paper5",
+        help="paper5: Table 4 tasks. paper10: Appendix G (adds ARC-E, OBQA, BoolQ, LAMBADA, SciQ).",
+    )
+    p.add_argument(
         "--tasks",
         nargs="+",
-        default=list(DEFAULT_TASKS),
-        help="lm-eval task ids (space separated)",
+        default=None,
+        help="Override lm-eval task ids (space separated). Default follows --suite.",
     )
     p.add_argument(
         "--batch-size-per-device",
@@ -296,6 +305,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    if args.tasks is None:
+        args.tasks = list(PAPER10_TASKS if args.suite == "paper10" else DEFAULT_TASKS)
 
     if _LM_EVAL_IMPORT_ERROR is not None:
         raise RuntimeError(

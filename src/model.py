@@ -1,14 +1,9 @@
-import os, types, torch, math
-import torch.distributed as dist
-from transformers import LlamaConfig, LlamaForCausalLM
-from sentence_transformers import SentenceTransformer
+import os, types, torch
+from transformers import AutoTokenizer, LlamaConfig, LlamaForCausalLM
 
-from typing import Optional, List, Union
-from transformers.cache_utils import Cache, DynamicCache
-from transformers.processing_utils import Unpack
-from transformers.utils import TransformersKwargs
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from typing import Optional
 
+from constants import TOKENIZER_NAME
 from dataset import add_prediction_mode
 
 
@@ -19,7 +14,7 @@ def to_directional_lm_model(
     include_direction: Optional[bool] = None,
 ):
     """
-    Next-token CE with the same L2R/R2L tensor layout as self-concept (direction token + flip for R2L).
+    Next-token CE with an L2R/R2L tensor layout (direction token + flip for R2L).
 
     When ``max_next_i == 1`` and ``fixed_i is None``, keeps the original single-direction-token
     behaviour: ``[<|direction|>, orig[0..L-2]]`` with next-token labels.
@@ -61,6 +56,13 @@ def to_directional_lm_model(
 
     use_next_i_path = (max_next_i > 1) or (fixed_i is not None)
 
+    # When True, model.eval() forces the clean evaluation view: 100% L2R and
+    # offset i=1. The augmented views exist to regularize training; the metric
+    # the paper reports is standard next-token prediction, so evaluation must
+    # not resample directions or offsets. Mirrors the self.training gate that
+    # apply_token_masking and apply_fim_augmentation already use.
+    model.clean_eval = True
+
     # Default (single-direction-token) branch; no extra setup needed.
     if not use_next_i_path:
         def forward(
@@ -78,8 +80,9 @@ def to_directional_lm_model(
                     **kwargs,
                 )
 
+            pct = 100.0 if (getattr(self, 'clean_eval', True) and not self.training) else l2r_pct
             batch_size = input_ids.shape[0]
-            l2r_batch_size = min(batch_size, max(0, int(batch_size * l2r_pct / 100.0 + 0.5)))
+            l2r_batch_size = min(batch_size, max(0, int(batch_size * pct / 100.0 + 0.5)))
             parts_i, parts_l = [], []
             if l2r_batch_size > 0:
                 orig = input_ids[:l2r_batch_size]
@@ -209,14 +212,19 @@ def to_directional_lm_model(
             self.next_i_ids = self.next_i_ids.to(device)
             self.next_i_probs = self.next_i_probs.to(device)
 
-        l2r_batch_size = min(
-            batch_size, max(0, int(batch_size * self.l2r_percent_attr / 100.0 + 0.5))
-        )
+        clean_eval = getattr(self, 'clean_eval', True) and not self.training
+        pct = 100.0 if clean_eval else self.l2r_percent_attr
+        l2r_batch_size = min(batch_size, max(0, int(batch_size * pct / 100.0 + 0.5)))
 
         if self.fixed_i is not None:
-            i_values_full = torch.full(
-                (batch_size,), int(self.fixed_i), dtype=torch.long, device=device
-            )
+            eval_i = int(self.fixed_i)
+        elif clean_eval:
+            eval_i = 1
+        else:
+            eval_i = None
+
+        if eval_i is not None:
+            i_values_full = torch.full((batch_size,), eval_i, dtype=torch.long, device=device)
         else:
             i_values_full = torch.multinomial(self.next_i_probs, batch_size, replacement=True) + 1
 
@@ -250,192 +258,6 @@ def to_directional_lm_model(
 
     model.forward = types.MethodType(forward, model)
 
-
-def to_concept_model(self, output_embedding_size: int = None, loss_func: str = ''):
-
-    self.embedding_head = torch.nn.Linear(self.config.hidden_size, output_embedding_size)
-    self.loss_func = loss_func
-    if loss_func == 'cosine':
-        self.cosine_loss = torch.nn.CosineEmbeddingLoss(reduction='mean')
-    elif loss_func == 'mse':
-        self.mse_loss = torch.nn.MSELoss()
-
-    def forward(
-        self,
-        embedding_forward: Optional[bool] = True,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        logits_to_keep: Union[int, torch.Tensor] = 0,
-        **kwargs: Unpack[TransformersKwargs],
-    ) -> CausalLMOutputWithPast:
-        r"""
-        Original: https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
-        ```"""
-        outputs: BaseModelOutputWithPast = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            **kwargs,
-        )
-
-        if embedding_forward:
-            embedding_output = self.embedding_head(outputs.last_hidden_state) # [batch size, max length, output embed size]
-
-            loss = None
-            if labels is not None: # [batch size, max length]
-                if self.loss_func == 'mse':
-                    loss = self.mse_loss(embedding_output, labels)
-                elif self.loss_func == 'cosine':
-                    embedding_output_flat = embedding_output.view(-1, embedding_output.size(-1))
-                    labels_flat = labels.view(-1, labels.size(-1))
-                    target = torch.ones(labels_flat.size(0), device=labels_flat.device)
-                    loss = self.cosine_loss(embedding_output_flat, labels_flat, target)
-                    if dist.is_initialized(): # account for multiple GPUs
-                        world_size = dist.get_world_size()
-                        loss = loss / world_size
-
-            logits = None # this should be fine
-
-        else:
-            hidden_states = outputs.last_hidden_state # [batch size, max length, hidden size]
-            # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-            slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-            logits = self.lm_head(hidden_states[:, slice_indices, :]) # [batch size, max length, vocab size]]
-
-            loss = None
-            if labels is not None:
-                loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
-
-    self.forward = types.MethodType(forward, self)
-
-def to_self_concept_model(
-    self, output_embedding_size: int = None, loss_func: str = '', 
-    shift: int = 1, tokenizer = None, l2r_percent: float = 50.0,
-    add_l2r_token: bool = True,
-):
-
-    self.loss_func = loss_func
-    if loss_func == 'cosine':
-        self.cosine_loss = torch.nn.CosineEmbeddingLoss(reduction='mean')
-    elif loss_func == 'mse':
-        self.mse_loss = torch.nn.MSELoss()
-    self.shift = shift
-    self.l2r_percent = min(max(float(l2r_percent), 0.0), 100.0)
-    modes = ['<|l2r_pred|>', '<|r2l_pred|>']
-    self.pred_modes = dict(zip(modes, tokenizer.convert_tokens_to_ids(modes)))
-
-    def forward(
-        self,
-        embedding_forward: Optional[bool] = True,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        logits_to_keep: Union[int, torch.Tensor] = 0,
-        **kwargs: Unpack[TransformersKwargs],
-    ) -> CausalLMOutputWithPast:
-        r"""
-        Original: https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
-        ```"""
-        if add_l2r_token:
-            batch_size = input_ids.shape[0]
-            l2r_batch_size = min(batch_size, max(0, int(batch_size * self.l2r_percent / 100.0 + 0.5)))
-            transformed_inputs = []
-            if l2r_batch_size > 0:
-                transformed_inputs.append(
-                    add_prediction_mode(
-                        input_ids[:l2r_batch_size, :],
-                        self.pred_modes,
-                        chosen_mode='<|l2r_pred|>',
-                    )
-                )
-            if l2r_batch_size < batch_size:
-                transformed_inputs.append(
-                    add_prediction_mode(
-                        input_ids[l2r_batch_size:, :],
-                        self.pred_modes,
-                        chosen_mode='<|r2l_pred|>',
-                    )
-                )
-            input_ids = transformed_inputs[0] if len(transformed_inputs) == 1 else torch.cat(transformed_inputs, dim=0)
-
-        outputs: BaseModelOutputWithPast = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            output_hidden_states=True,
-            **kwargs,
-        )
-
-        if embedding_forward:
-            input_embed = outputs.hidden_states[0].detach() # [batch size, max length, hidden size]
-            target_embed = input_embed[:, 1:-(self.shift-1) or None, :]
-            for i in range(1, self.shift):
-                target_embed = target_embed + math.e**(-i) * input_embed[:, i+1:-(self.shift-i-1) or None, :]
-            target_embed = target_embed / sum([math.e**(-i) for i in range(self.shift)])
-            
-            target_embed = torch.nn.functional.normalize(target_embed, p=2, dim=-1)
-            pred_embed = outputs.last_hidden_state[:, :-self.shift, :] # shift 1
-            pred_embed = torch.nn.functional.normalize(pred_embed, p=2, dim=-1)
-
-            if self.loss_func == 'mse':
-                loss = self.mse_loss(pred_embed, target_embed)
-            elif self.loss_func == 'cosine':
-                pred_embed_flat = pred_embed.view(-1, pred_embed.size(-1))
-                target_embed_flat = target_embed.view(-1, target_embed.size(-1))
-                target = torch.ones(target_embed_flat.size(0), device=target_embed_flat.device)
-                loss = self.cosine_loss(pred_embed_flat, target_embed_flat, target)
-                if dist.is_initialized(): # account for multiple GPUs
-                    world_size = dist.get_world_size()
-                    loss = loss / world_size
-            
-            logits = None # this should be fine
-
-        else:
-            hidden_states = outputs.last_hidden_state # [batch size, max length, hidden size]
-            # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-            slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-            logits = self.lm_head(hidden_states[:, slice_indices, :]) # [batch size, max length, vocab size]]
-
-            loss = None
-            if labels is not None:
-                loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
-
-    self.forward = types.MethodType(forward, self)
 
 def apply_token_masking(
     model, tokenizer, mask_percent: float, random_token_percent: float,
@@ -530,22 +352,24 @@ def apply_token_masking(
             u = torch.rand(input_ids.shape, device=input_ids.device)
             result = input_ids.clone()
 
-            # Random token replacement (threshold band above mask band)
+            # Random token replacement (threshold band above mask band).
+            # Drawn for every position and selected with torch.where rather than
+            # boolean-indexed assignment: counting the selected positions needs
+            # do_random.sum().item(), which forces a host sync on every
+            # micro-batch and breaks the compiled graph.
             if self.random_rate > 0.0:
                 if self._random_vocab_pool.device != input_ids.device:
                     self._random_vocab_pool = self._random_vocab_pool.to(input_ids.device)
                 do_random = (u >= self.mask_rate) & (u < self.mask_rate + self.random_rate) & ~protected
-                n_random = int(do_random.sum().item())
-                if n_random > 0:
-                    idx = torch.randint(
-                        len(self._random_vocab_pool), (n_random,), device=input_ids.device
-                    )
-                    result[do_random] = self._random_vocab_pool[idx]
+                idx = torch.randint(
+                    len(self._random_vocab_pool), input_ids.shape, device=input_ids.device
+                )
+                result = torch.where(do_random, self._random_vocab_pool[idx], result)
 
             # <|mask|> replacement (lowest threshold band, highest priority in the draw)
             if self.mask_rate > 0.0:
                 do_mask = (u < self.mask_rate) & ~protected
-                result[do_mask] = self.mask_token_id
+                result = torch.where(do_mask, torch.full_like(result, self.mask_token_id), result)
 
             input_ids = result
         return inner_forward(input_ids=input_ids, attention_mask=attention_mask, labels=labels, **kwargs)
@@ -695,39 +519,24 @@ def build_model_and_tokenizer(args):
             device = torch.device("cuda")
     else:
         device = torch.device("cpu")
-    # tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b", model_max_length=args.model_max_length)
-    # tokenizer.pad_token = tokenizer.eos_token
 
-    # load_in_8bit makes it 2x slower for some reason
-    # Non-concept runs only need the tokenizer; load on CPU so every rank does not put Qwen on cuda:0.
-    if args.model_type == 'concept':
-        embedding_model = SentenceTransformer(
-            args.embedding_model,
-            model_kwargs={'dtype': 'float16'},
-            device=str(device),
-        )
-    else:
-        embedding_model = SentenceTransformer(args.embedding_model, device='cpu')
-    print(f'Embedding model {args.embedding_model} loaded.')
-
-    tokenizer = embedding_model.tokenizer
-    additional_specials = ['<|l2r_pred|>', '<|r2l_pred|>']
-    max_next_i = int(getattr(args, 'max_next_i', 1))
+    tokenizer_name = getattr(args, "tokenizer", None) or TOKENIZER_NAME
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    additional_specials = ["<|l2r_pred|>", "<|r2l_pred|>"]
+    max_next_i = int(getattr(args, "max_next_i", 1))
     if max_next_i > 1:
-        additional_specials += [f'<|next_{i}_pred|>' for i in range(1, max_next_i + 1)]
-    mask_percent = float(getattr(args, 'mask_percent', 0.0))
-    random_token_percent = float(getattr(args, 'random_token_percent', 0.0))
+        additional_specials += [f"<|next_{i}_pred|>" for i in range(1, max_next_i + 1)]
+    mask_percent = float(getattr(args, "mask_percent", 0.0))
+    random_token_percent = float(getattr(args, "random_token_percent", 0.0))
     if mask_percent > 0.0:
-        additional_specials += ['<|mask|>']
-    psm_percent = float(getattr(args, 'psm_percent', 0.0))
-    spm_percent = float(getattr(args, 'spm_percent', 0.0))
+        additional_specials += ["<|mask|>"]
+    psm_percent = float(getattr(args, "psm_percent", 0.0))
+    spm_percent = float(getattr(args, "spm_percent", 0.0))
     if psm_percent > 0.0 or spm_percent > 0.0:
-        additional_specials += ['<|fim_prefix|>', '<|fim_suffix|>', '<|fim_middle|>']
-    tokenizer.add_special_tokens({'additional_special_tokens': additional_specials})
-    if args.model_type != 'concept':
-        embedding_model = None
+        additional_specials += ["<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>"]
+    tokenizer.add_special_tokens({"additional_special_tokens": additional_specials})
     tokenizer.pad_token = tokenizer.eos_token
-    print('EOS token:', tokenizer.eos_token)
+    print("EOS token:", tokenizer.eos_token)
 
     config = LlamaConfig(
         vocab_size=len(tokenizer),
@@ -742,24 +551,19 @@ def build_model_and_tokenizer(args):
         pad_token_id=tokenizer.pad_token_id,
         bos_token_id=tokenizer.bos_token_id,
         eos_token_id=tokenizer.eos_token_id,
-        tie_word_embeddings=True, # Qwen ties but Llama does not. Tied due to Qwen tokenizer's large vocab size
+        tie_word_embeddings=True,
     )
 
     model = LlamaForCausalLM(config).to(device)
-    print('total params:', sum(p.numel() for p in model.parameters()))
+    print("total params:", sum(p.numel() for p in model.parameters()))
 
-    if args.model_type == 'concept':
-        to_concept_model(model, output_embedding_size=args.output_embedding_size, loss_func=args.embed_loss_func)
-    elif args.model_type == 'self-concept':
-        to_self_concept_model(
-            model, output_embedding_size=args.output_embedding_size, 
-            loss_func=args.embed_loss_func, shift=args.embed_window_size,
-            tokenizer=tokenizer, l2r_percent=args.l2r_percent,
-        )
-    elif args.model_type == 'default' and (
-        abs(args.l2r_percent - 100.0) > 1e-6 or max_next_i > 1
-        or mask_percent > 0.0 or random_token_percent > 0.0
-        or psm_percent > 0.0 or spm_percent > 0.0
+    if (
+        abs(args.l2r_percent - 100.0) > 1e-6
+        or max_next_i > 1
+        or mask_percent > 0.0
+        or random_token_percent > 0.0
+        or psm_percent > 0.0
+        or spm_percent > 0.0
     ):
         if abs(args.l2r_percent - 100.0) > 1e-6 or max_next_i > 1:
             to_directional_lm_model(
@@ -767,8 +571,8 @@ def build_model_and_tokenizer(args):
                 tokenizer,
                 l2r_percent=args.l2r_percent,
                 max_next_i=max_next_i,
-                next_i_weighting=getattr(args, 'next_i_weighting', 'uniform'),
-                next_i_temperature=float(getattr(args, 'next_i_temperature', 1.0)),
+                next_i_weighting=getattr(args, "next_i_weighting", "uniform"),
+                next_i_temperature=float(getattr(args, "next_i_temperature", 1.0)),
             )
         if psm_percent > 0.0 or spm_percent > 0.0:
             apply_fim_augmentation(

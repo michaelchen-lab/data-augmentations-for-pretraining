@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+title: "Demystifying Training-Time Augmentation for Data-Constrained Language Model Pretraining"
+message: "If you use this software, please cite the paper."
+type: software
+authors:
+  - family-names: Chen
+    given-names: Michael K.
+  - family-names: Zhang
+    given-names: Xikun
+  - family-names: Bai
+    given-names: Fan
+  - family-names: Hu
+    given-names: Zhengding
+  - family-names: Wang
+    given-names: Zhen
+repository-code: "https://github.com/michaelchen-lab/data-augmentations-for-pretraining"
+license: MIT
+preferred-citation:
+  type: article
+  title: "Demystifying Training-Time Augmentation for Data-Constrained Language Model Pretraining"
+  authors:
+    - family-names: Chen
+      given-names: Michael K.
+    - family-names: Zhang
+      given-names: Xikun
+    - family-names: Bai
+      given-names: Fan
+    - family-names: Hu
+      given-names: Zhengding
+    - family-names: Wang
+      given-names: Zhen
+  year: 2026

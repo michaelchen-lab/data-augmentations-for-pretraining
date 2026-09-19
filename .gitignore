@@ -10,17 +10,27 @@ build/
 # Environment
 .env
 *.env
+.venv/
+venv/
 
 # Data (auto-downloaded; can be large)
 pretraining_data/
 finetuning_datasets/
 
-# Training outputs
+# Training outputs and local logs
 runs/
 results/
-
-# Generated figures
+wandb/
+scratch/
 figures/
+*.log
+sweep_*.log
+
+# Machine-local launchers (GPU indices, absolute paths)
+continue_*.sh
+queue_seeds*.sh
+chain_t2a.sh
+src/scripts/bench.py
 
 # Cache
 .cache/
