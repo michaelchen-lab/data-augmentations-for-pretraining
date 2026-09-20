@@ -31,6 +31,7 @@ AUG_FLAGS = {
     "random_token_percent": "--random-token-percent",
     "psm_percent": "--psm-percent",
     "spm_percent": "--spm-percent",
+    "dropout": "--dropout",
 }
 
 

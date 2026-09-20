@@ -29,6 +29,7 @@ sweep_*.log
 # Machine-local launchers (GPU indices, absolute paths)
 continue_*.sh
 queue_seeds*.sh
+queue_dropout*.sh
 chain_t2a.sh
 src/scripts/bench.py
 

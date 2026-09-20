@@ -98,6 +98,13 @@ python scripts/run_paper.py --protocol decay \
 
 Then evaluate the decay run directory the same way. Resume steps for all eight decay configs are in `configs/paper_runs.json` (Appendix decay-details table).
 
+Residual dropout (after attention `o_proj` and MLP `down_proj`; default `--dropout 0`). Eval dropout-only with `--no-add-l2r-token`; eval the stack with `--add-l2r-token`.
+
+```bash
+python scripts/run_paper.py --protocol a --run baseline-dropout0.20 --nproc 4
+python scripts/run_paper.py --protocol a --run dropout0.20-random5-l2r50-i5-exp-fulle-lm --nproc 4
+```
+
 Zero-shot (Table 4 five tasks; Appendix G ten tasks):
 
 ```bash
@@ -173,6 +180,7 @@ Checkpoints and large result dumps are not in git. Download them from Hugging Fa
 | Global batch | 512 sequences |
 | Peak LR | \(6 \times 10^{-4}\) |
 | Weight decay | 0.033 |
+| Dropout | 0 (off). Residual \(p\in\{0.05,0.10,0.20\}\) in the dropout comparison |
 | Optimizer | AdamW \(\beta=(0.9, 0.999)\), grad clip 1.0 |
 | Protocol A | constant LR, 100-step warmup, snapshot every 4 epochs |
 | Protocol A decay | WSD \(1-\sqrt{\cdot}\), ~20% of resume step |

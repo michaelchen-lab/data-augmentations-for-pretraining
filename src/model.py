@@ -508,6 +508,47 @@ def apply_fim_augmentation(
     model.forward = types.MethodType(forward, model)
 
 
+def apply_residual_dropout(model, p: float) -> None:
+    """Slowrun residual dropout: after attention ``o_proj`` and MLP ``down_proj``.
+
+    Matches qlabs-eng/slowrun baseline ``train.py`` (commit 0d49316):
+    ``x = x + Dropout(attn_out)`` and ``x = x + Dropout(mlp_out)``. This is
+    not attention-score dropout; Llama ``attention_dropout`` stays 0.
+    Checkpoint keys are unchanged, so eval loads the Linear weights as usual
+    (dropout is off in ``model.eval()``).
+    """
+    p = float(p)
+    if p <= 0.0:
+        return
+    if not 0.0 < p < 1.0:
+        raise ValueError(f"dropout must be in (0, 1); got {p}")
+    layers = model.model.layers
+    n = 0
+    for layer in layers:
+        _patch_proj_dropout(layer.self_attn.o_proj, p)
+        _patch_proj_dropout(layer.mlp.down_proj, p)
+        n += 2
+    print(
+        f"residual dropout p={p:g} on {n} projections "
+        f"(attn o_proj + mlp down_proj, {len(layers)} layers)",
+        flush=True,
+    )
+
+
+def _patch_proj_dropout(linear: torch.nn.Linear, p: float) -> None:
+    if getattr(linear, "_resid_dropout_p", None) is not None:
+        return
+    orig_forward = linear.forward
+
+    def forward(x, *args, **kwargs):
+        return torch.nn.functional.dropout(
+            orig_forward(x, *args, **kwargs), p=p, training=linear.training
+        )
+
+    linear.forward = forward
+    linear._resid_dropout_p = p
+
+
 def build_model_and_tokenizer(args):
     if torch.cuda.is_available():
         world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -556,6 +597,9 @@ def build_model_and_tokenizer(args):
 
     model = LlamaForCausalLM(config).to(device)
     print("total params:", sum(p.numel() for p in model.parameters()))
+
+    dropout_p = float(getattr(args, "dropout", 0.0) or 0.0)
+    apply_residual_dropout(model, dropout_p)
 
     if (
         abs(args.l2r_percent - 100.0) > 1e-6

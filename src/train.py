@@ -210,6 +210,7 @@ def train(args):
         'epochs_requested': args.epochs,
         'learning_rate': args.learning_rate,
         'weight_decay': args.weight_decay,
+        'dropout': args.dropout,
         'seed': args.seed,
         'precision': args.precision,
         'global_batch_sequences': (
@@ -360,6 +361,11 @@ def add_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--save-final-only", action="store_true", default=False)
     parser.add_argument("--num-decay-steps", type=int, default=0)
     parser.add_argument('--weight-decay', '-wd', type=float, default=0.033)
+    parser.add_argument(
+        '--dropout', type=float, default=0.0,
+        help='Residual dropout after attention o_proj and MLP down_proj '
+             '(Slowrun / GPT-2 style). 0 disables. Not attention-score dropout.',
+    )
     parser.add_argument('--training-files-no', type=int, default=3)
     parser.add_argument('--pretraining-tokens', '-pt', type=int, default=75)
     parser.add_argument('--val-files-no', type=int, default=1)

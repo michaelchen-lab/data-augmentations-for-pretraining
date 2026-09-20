@@ -9,7 +9,7 @@
     "max_length": 2048
   },
   "protocol_a": {
-    "description": "Tables 1-3, decay, downstream. 2xH100 or 4xA100. Snapshot every 4 epochs, post-hoc L2R eval, then WSD decay from the min-loss checkpoint.",
+    "description": "Tables 1-3, decay, downstream, residual-dropout comparison. 2xH100 or 4xA100. Snapshot every 4 epochs, post-hoc L2R eval, then WSD decay from the min-loss checkpoint. Dropout default is 0.",
     "nproc_paper": 2,
     "pretraining_tokens": 75,
     "training_files_no": 3,
@@ -44,7 +44,11 @@
       {"name": "random5-l2r50-i5-exp-fulle-lm", "table": "2", "aug": {"random_token_percent": 5, "l2r_percent": 50, "max_next_i": 5, "next_i_weighting": "exp"}},
       {"name": "random15-l2r50-i5-exp-fulle-lm", "table": "2", "aug": {"random_token_percent": 15, "l2r_percent": 50, "max_next_i": 5, "next_i_weighting": "exp"}},
       {"name": "mask15-l2r50-i5-exp-fulle-lm", "table": "2", "aug": {"mask_percent": 15, "l2r_percent": 50, "max_next_i": 5, "next_i_weighting": "exp"}},
-      {"name": "mask15-l2r50-i2-fulle-lm", "table": "2", "aug": {"mask_percent": 15, "l2r_percent": 50, "max_next_i": 2}}
+      {"name": "mask15-l2r50-i2-fulle-lm", "table": "2", "aug": {"mask_percent": 15, "l2r_percent": 50, "max_next_i": 2}},
+      {"name": "baseline-dropout0.05", "note": "residual dropout p=0.05", "aug": {"dropout": 0.05}},
+      {"name": "baseline-dropout0.10", "note": "residual dropout p=0.10 (Xue et al. 2023)", "aug": {"dropout": 0.10}},
+      {"name": "baseline-dropout0.20", "note": "residual dropout p=0.20", "aug": {"dropout": 0.20}},
+      {"name": "dropout0.20-random5-l2r50-i5-exp-fulle-lm", "note": "best dropout + 3-cat", "aug": {"dropout": 0.20, "random_token_percent": 5, "l2r_percent": 50, "max_next_i": 5, "next_i_weighting": "exp"}}
     ]
   },
   "decay": {
